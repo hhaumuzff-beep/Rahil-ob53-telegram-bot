@@ -1,0 +1,17 @@
+
+services:
+  - type: web
+    name: free-fire-bot
+    env: python
+    plan: free  # Agar paid plan hai toh ise hata kar 'scaling' wapas laga sakte hain
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.8
+      - key: BOT_TOKEN
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
