@@ -26,7 +26,7 @@ if not BOT_TOKEN:
 REQUIRED_CHANNELS = ["@eaglelikeera"]
 GROUP_JOIN_LINK = "https://t.me/eaglelikeera03"
 OWNER_ID = 7790124713
-OWNER_USERNAME = "@eaglehitsdiff"
+OWNER_USERNAME = "t.me/ankushraj444"
 bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
 like_tracker = {}
 
