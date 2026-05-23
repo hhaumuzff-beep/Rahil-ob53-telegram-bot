@@ -5,6 +5,7 @@ import time
 import threading
 import asyncio
 import logging
+import sys
 from datetime import datetime, timedelta, timezone
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask, request, jsonify
@@ -17,49 +18,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # === CONFIG ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Render Link eg: https://your-service.onrender.com
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8812061930:AAHfNmIA9M14bS72PWP4bQ3a0_UYWp4abyI")
 
-REQUIRED_CHANNELS = ["@eaglelikeera"]
-GROUP_JOIN_LINK = "https://t.me/eaglelikeera03"
-OWNER_ID = 7118852390
-OWNER_USERNAME = "@eaglehitsdiff"
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN not found! Please set your bot token in environment variables.")
 
+OWNER_ID = 7790124713
+OWNER_USERNAME = "@ankushraj444"
 bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
-like_tracker = {}   # in-memory usage cache
+like_tracker = {}   # in-memory cache
+
+# Flask app for webhook
 app = Flask(__name__)
 
 # === DATA RESET ===
 def reset_limits():
+    """Daily reset of usage tracker (in-memory only)."""
     while True:
         try:
             now_utc = datetime.now(timezone.utc)
             next_reset = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             sleep_seconds = (next_reset - now_utc).total_seconds()
+
             time.sleep(sleep_seconds)
             like_tracker.clear()
-            logger.info("✅ Daily limits reset at 00:00 UTC.")
+            logger.info("✅ Daily limits reset at 00:00 UTC (in-memory).")
         except Exception as e:
             logger.error(f"Error in reset_limits thread: {e}")
 
-threading.Thread(target=reset_limits, daemon=True).start()
 
 # === UTILS ===
 def is_user_in_channel(user_id):
-    if not bot:
-        return True
-    try:
-        for channel in REQUIRED_CHANNELS:
-            member = bot.get_chat_member(channel, user_id)
-            if member.status not in ['member', 'administrator', 'creator']:
-                return False
-        return True
-    except Exception as e:
-        logger.error(f"Join check failed: {e}")
-        return False
+    return True
+
 
 def call_api(region, uid):
-    # This calls your Like Generation API
     url = f"https://free-fire-like-api-black.vercel.app/like?uid={uid}&server_name={region}"
     try:
         response = requests.get(url, timeout=20)
@@ -68,19 +61,39 @@ def call_api(region, uid):
         return response.json()
     except requests.exceptions.RequestException:
         return {"error": "API Failed. Please try again later."}
+    except ValueError:
+        return {"error": "Invalid JSON response."}
+
 
 def get_user_limit(user_id):
     if user_id == OWNER_ID:
         return 999999999  # Unlimited for owner
     return 1  # 1 request per day for regular users
 
-# === FLASK WEBHOOK ROUTES ===
+
+# Start background thread
+threading.Thread(target=reset_limits, daemon=True).start()
+
+# === TOKEN AUTO UPDATE ===
+try:
+    from token_refresh import auto_refresh
+    threading.Thread(
+        target=lambda: asyncio.run(auto_refresh()),
+        daemon=True
+    ).start()
+    logger.info("Token refresh thread started.")
+except ImportError:
+    logger.warning("token_refresh.py not found. Skipping auto-refresh feature.")
+except Exception as e:
+    logger.error(f"Error starting token refresh: {e}")
+
+# === FLASK ROUTES ===
 @app.route('/')
 def home():
     return jsonify({
         'status': 'Bot is running',
-        'health': 'OK',
-        'mode': 'Webhook Enabled' if WEBHOOK_URL else 'Polling Mode'
+        'bot': 'Free Fire Likes Bot',
+        'health': 'OK'
     })
 
 @app.route('/health')
@@ -90,49 +103,36 @@ def health():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if not bot:
+        print("🤖 [WEBHOOK] ERROR: Bot token not specified in environment variable!", flush=True)
         return jsonify({"error": "Bot token not specified"}), 400
     try:
         json_str = request.get_data().decode('UTF-8')
+        print(f"🤖 [WEBHOOK] Received update from Telegram! Payload: {json_str[:250]}...", flush=True)
         update = telebot.types.Update.de_json(json_str)
         bot.process_new_updates([update])
+        print("🤖 [WEBHOOK] Update processed successfully.", flush=True)
         return '', 200
     except Exception as e:
+        print(f"🤖 [WEBHOOK] Exception during processing: {e}", flush=True)
         logger.error(f"Webhook error: {e}")
         return '', 500
+
 
 # === TELEGRAM COMMANDS ===
 if bot:
     @bot.message_handler(commands=['start'])
     def start_command(message):
         user_id = message.from_user.id
-        if not is_user_in_channel(user_id):
-            markup = InlineKeyboardMarkup()
-            for channel in REQUIRED_CHANNELS:
-                markup.add(InlineKeyboardButton(f"🔗 Join {channel}", url=f"https://t.me/{channel.strip('@')}"))
-            bot.reply_to(message, "📢 *Channel Membership Required*\n\nTo use this bot, you must join our channel first!", reply_markup=markup, parse_mode="Markdown")
-            return
-        
         if user_id not in like_tracker:
             like_tracker[user_id] = {"used": 0, "last_used": datetime.now(timezone.utc) - timedelta(days=1)}
-        bot.reply_to(message, "✅ *You are verified!*\n\nUse `/like <server> <uid>` command to send likes.", parse_mode="Markdown")
+        bot.reply_to(message, "✅ Welcome! Use /like to send likes.\n\n*Format:* `/like <region> <uid>`", parse_mode="Markdown")
+
 
     @bot.message_handler(commands=['like'])
     def handle_like(message):
         user_id = message.from_user.id
+        chat_id = message.chat.id
         args = message.text.split()
-
-        if message.chat.type == "private" and user_id != OWNER_ID:
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("🔗 Join Official Group", url=GROUP_JOIN_LINK))
-            bot.reply_to(message, "❌ Sorry! command is not allowed here.\n\nJoin our official group:", reply_markup=markup)
-            return
-
-        if not is_user_in_channel(user_id):
-            markup = InlineKeyboardMarkup()
-            for channel in REQUIRED_CHANNELS:
-                markup.add(InlineKeyboardButton(f"🔗 Join {channel}", url=f"https://t.me/{channel.strip('@')}"))
-            bot.reply_to(message, "❌ You must join our channels to use this command.", reply_markup=markup, parse_mode="Markdown")
-            return
 
         if len(args) != 3:
             bot.reply_to(message, "❌ Format: `/like server_name uid`", parse_mode="Markdown")
@@ -140,17 +140,20 @@ if bot:
 
         region, uid = args[1], args[2]
         if not region.isalpha() or not uid.isdigit():
-            bot.reply_to(message, "⚠️ Invalid input format! Use: `/like server_name uid`", parse_mode="Markdown")
+            bot.reply_to(message, "⚠️ Invalid input. Use: `/like server_name uid`", parse_mode="Markdown")
             return
 
         threading.Thread(target=process_like, args=(message, region, uid)).start()
+
 
     def process_like(message, region, uid):
         user_id = message.from_user.id
         now_utc = datetime.now(timezone.utc)
         usage = like_tracker.get(user_id, {"used": 0, "last_used": now_utc - timedelta(days=1)})
 
-        if now_utc.date() > usage["last_used"].date():
+        last_used_date = usage["last_used"].date()
+        current_date = now_utc.date()
+        if current_date > last_used_date:
             usage["used"] = 0
 
         max_limit = get_user_limit(user_id)
@@ -158,80 +161,148 @@ if bot:
             bot.reply_to(message, f"⚠️ You have exceeded your daily request limit!")
             return
 
-        processing_msg = bot.reply_to(message, "⏳ *Please wait... Sending likes...*", parse_mode="Markdown")
+        processing_msg = bot.reply_to(message, "⏳ Please wait... Sending likes...")
         response = call_api(region, uid)
 
         if "error" in response:
-            bot.reply_to(message, f"⚠️ API Error: {response['error']}")
+            try:
+                bot.edit_message_text(
+                    chat_id=processing_msg.chat.id,
+                    message_id=processing_msg.message_id,
+                    text=f"⚠️ API Error: {response['error']}"
+                )
+            except:
+                bot.reply_to(message, f"⚠️ API Error: {response['error']}")
             return
 
         if not isinstance(response, dict) or response.get("status") != 1:
-            bot.reply_to(message, "❌ UID already received max likes. Limit reached for today, try another UID.")
+            try:
+                bot.edit_message_text(
+                    chat_id=processing_msg.chat.id,
+                    message_id=processing_msg.message_id,
+                    text="❌ UID has already received its max amount of likes. Limit reached for today, try another UID or after 24 hrs."
+                )
+            except:
+                bot.reply_to(message, "⚠️ Invalid UID or unable to fetch data.")
             return
 
         try:
             player_uid = str(response.get("UID", uid)).strip()
             player_name = response.get("PlayerNickname", "N/A")
-            reg = str(response.get("Region", "N/A"))
+            region = str(response.get("Region", "N/A"))
             likes_before = str(response.get("LikesbeforeCommand", "N/A"))
             likes_after = str(response.get("LikesafterCommand", "N/A"))
             likes_given = str(response.get("LikesGivenByAPI", "N/A"))
+
+            total_like = likes_after
 
             usage["used"] += 1
             usage["last_used"] = now_utc
             like_tracker[user_id] = usage
             
-            response_text = f"✅ *Request Processed Successfully*\n\n👤 *Name:* `{player_name}`\n🆔 *UID:* `{player_uid}`\n🌍 *Region:* `{reg}`\n🤡 *Likes Before:* `{likes_before}`\n📈 *Likes Added:* `{likes_given}`\n🗿 *Total Likes Now:* `{likes_after}`\n🔐 *Remaining Requests:* `{max_limit - usage['used']}`"
-            bot.edit_message_text(chat_id=processing_msg.chat.id, message_id=processing_msg.message_id, text=response_text, parse_mode="Markdown")
+            response_text = f"""✅ *Request Processed Successfully*\n\n👤 *Name:* `{player_name}`\n🆔 *UID:* `{player_uid}`\n🌍 *Region:* `{region}`\n🤡 *Likes Before:* `{likes_before}`\n📈 *Likes Added:* `{likes_given}`\n🗿 *Total Likes Now:* `{total_like}`\n🔐 *Remaining Requests:* `{max_limit - usage['used']}`\n👑 *Credit:* {OWNER_USERNAME}"""
+
+            markup = InlineKeyboardMarkup()
+
+            bot.edit_message_text(
+                chat_id=processing_msg.chat.id,
+                message_id=processing_msg.message_id,
+                text=response_text,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+
         except Exception as e:
-            logger.error(f"Error in process_like details: {e}")
-            bot.reply_to(message, "⚠️ Likes sent! (Could not parse visual detail payload).")
+            logger.error(f"Error in process_like: {e}")
+            bot.reply_to(message, "⚠️ Something went wrong. Likes Send, I can't decode your info.")
+
 
     @bot.message_handler(commands=["remain"])
     def owner_commands(message):
         if message.from_user.id != OWNER_ID:
             return
-        lines = ["📊 *Remaining Daily Requests Per User:*"]
-        if not like_tracker:
-            lines.append("❌ No users active today.")
-        else:
-            for uid, usage in like_tracker.items():
-                limit = get_user_limit(uid)
-                used = usage.get("used", 0)
-                limit_str = "Unlimited" if limit > 1000 else str(limit)
-                lines.append(f"👤 `{uid}` ➜ {used}/{limit_str}")
-        bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+
+        args = message.text.split()
+        cmd = args[0].lower()
+
+        if cmd == "/remain":
+            lines = ["📊 *Remaining Daily Requests Per User:*"]
+            if not like_tracker:
+                lines.append("❌ No users have used the bot yet today.")
+            else:
+                for uid, usage in like_tracker.items():
+                    limit = get_user_limit(uid)
+                    used = usage.get("used", 0)
+                    limit_str = "Unlimited" if limit > 1000 else str(limit)
+                    lines.append(f"👤 `{uid}` ➜ {used}/{limit_str}")
+            bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
+        user_id = message.from_user.id
+
+        if user_id == OWNER_ID:
+            help_text = (
+                f"📖 *Bot Commands:*\n\n"
+                f"🧑💻 `/like <region> <uid>` - Send likes to Free Fire UID\n"
+                f"🔰 `/start` - Start the bot\n"
+                f"🆘 `/help` - Show this help menu\n\n"
+                f"👑 *Owner Commands:*\n"
+                f"📈 `/remain` - Show all users' usage & stats\n\n"
+                f"📞 *Support:* {OWNER_USERNAME}"
+            )
+            bot.reply_to(message, help_text, parse_mode="Markdown")
+            return
+
         help_text = (
             f"📖 *Bot Commands:*\n\n"
-            f"🧑💻 `/like <region> <uid>` - Send likes to UID\n"
-            f"🔰 `/start` - Start or verify\n"
-            f"🆘 `/help` - Help Menu"
+            f"🧑💻 `/like <region> <uid>` - Send likes to Free Fire UID\n"
+            f"🔰 `/start` - Start the bot\n"
+            f"🆘 `/help` - Show this help menu\n\n"
+            f"📞 *Support:* {OWNER_USERNAME}"
         )
         bot.reply_to(message, help_text, parse_mode="Markdown")
 
-    # === WEBHOOK SETUP VS POLLING BOOT ===
-    if WEBHOOK_URL:
+
+    @bot.message_handler(func=lambda message: True, content_types=['text'])
+    def reply_all(message):
+        if message.text.startswith('/'):
+            return
+
+    # Auto-detect Webhook vs Polling
+    RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+    RENDER_SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME")
+    IS_RENDER = os.getenv("RENDER") == "true" or RENDER_SERVICE_NAME is not None or RENDER_URL is not None
+    
+    if IS_RENDER:
+        if not RENDER_URL:
+            if RENDER_SERVICE_NAME:
+                RENDER_URL = f"https://{RENDER_SERVICE_NAME}.onrender.com"
+                print(f"🤖 [WEBHOOK] Inferred RENDER_URL from service name: {RENDER_URL}", flush=True)
+            else:
+                RENDER_URL = "https://rahil-ob53-telegram-bot.onrender.com"
+                print(f"🤖 [WEBHOOK] Defaulted to hardcoded user RENDER_URL: {RENDER_URL}", flush=True)
+        
+        webhook_url = f"{RENDER_URL.rstrip('/')}/webhook"
+        print(f"🤖 [WEBHOOK] Detected Render environment! Setting webhook to: {webhook_url}", flush=True)
         try:
             bot.remove_webhook()
-            # Set webhook pointing to Render
-            bot.set_webhook(url=f"{WEBHOOK_URL.rstrip('/')}/webhook")
-            logger.info(f"🚀 Webhook registered successfully pointing to: {WEBHOOK_URL}")
-        except Exception as e:
-            logger.error(f"Failed to set webhook, falling back: {e}")
+            success = bot.set_webhook(url=webhook_url)
+            print(f"🤖 [WEBHOOK] Webhook registration status with Telegram: {success}", flush=True)
+        except Exception as we:
+            print(f"🤖 [WEBHOOK] Webhook registration failed: {we}", flush=True)
+            logger.error(f"Failed to set Telegram webhook: {we}")
     else:
-        def run_polling():
+        def run_bot_polling():
             try:
+                print("🔌 [POLLING] Removing any existing webhook to start polling...", flush=True)
                 bot.remove_webhook()
-                bot.infinity_polling(skip_pending_updates=True)
+                print("🔌 [POLLING] Bot starting background infinity polling...", flush=True)
+                bot.infinity_polling(skip_pending_updates=True, timeout=60, write_timeout=20)
             except Exception as e:
-                logger.error(f"Polling crash: {e}")
-        threading.Thread(target=run_polling, daemon=True).start()
-        logger.info("📡 Safe fallback background polling triggered.")
+                print(f"🔌 [POLLING] Polling crashed: {e}", flush=True)
+                logger.error(f"Bot background polling crashed: {e}")
 
-if __name__ == "__main__":
-    PORT = int(os.environ.get("PORT", 10000))
-    # Start web app for Webhook & Health requests
-    app.run(host="0.0.0.0", port=PORT)
+        threading.Thread(target=run_bot_polling, daemon=True).start()
+        print("🔌 [POLLING] Background polling thread deployed successfully.", flush=True)
