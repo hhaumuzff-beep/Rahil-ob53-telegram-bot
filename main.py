@@ -20,9 +20,6 @@ logger = logging.getLogger(__name__)
 # === CONFIG ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8812061930:AAHfNmIA9M14bS72PWP4bQ3a0_UYWp4abyI")
 
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN not found! Please set your bot token in environment variables.")
-
 OWNER_ID = 7790124713
 OWNER_USERNAME = "@ankushraj444"
 bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
@@ -88,16 +85,40 @@ except Exception as e:
     logger.error(f"Error starting token refresh: {e}")
 
 # === FLASK ROUTES ===
+def register_dynamic_webhook(request_url_root):
+    if not bot:
+        return None
+    try:
+        base_url = request_url_root
+        if base_url.startswith("http://"):
+            base_url = "https://" + base_url[7:]
+        elif not base_url.startswith("https://"):
+            base_url = "https://" + base_url
+            
+        webhook_url = f"{base_url.rstrip('/')}/webhook"
+        print(f"🤖 [DYNAMIC WEBHOOK] Auto-configuring webhook to: {webhook_url}", flush=True)
+        bot.remove_webhook()
+        success = bot.set_webhook(url=webhook_url)
+        print(f"🤖 [DYNAMIC WEBHOOK] Registration status: {success}", flush=True)
+        return webhook_url
+    except Exception as e:
+        print(f"🤖 [DYNAMIC WEBHOOK] Registration failed: {e}", flush=True)
+        return None
+
 @app.route('/')
 def home():
+    registered_url = register_dynamic_webhook(request.url_root)
     return jsonify({
         'status': 'Bot is running',
         'bot': 'Free Fire Likes Bot',
-        'health': 'OK'
+        'health': 'OK',
+        'detected_domain': request.url_root,
+        'webhook_registered': registered_url
     })
 
 @app.route('/health')
 def health():
+    register_dynamic_webhook(request.url_root)
     return jsonify({'status': 'healthy'}), 200
 
 @app.route('/webhook', methods=['POST'])
@@ -271,29 +292,34 @@ if bot:
             return
 
     # Auto-detect Webhook vs Polling
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
     RENDER_SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME")
-    IS_RENDER = os.getenv("RENDER") == "true" or RENDER_SERVICE_NAME is not None or RENDER_URL is not None
+    IS_RENDER = os.getenv("RENDER") == "true" or RENDER_SERVICE_NAME is not None or RENDER_URL is not None or WEBHOOK_URL is not None
     
     if IS_RENDER:
-        if not RENDER_URL:
-            if RENDER_SERVICE_NAME:
-                RENDER_URL = f"https://{RENDER_SERVICE_NAME}.onrender.com"
-                print(f"🤖 [WEBHOOK] Inferred RENDER_URL from service name: {RENDER_URL}", flush=True)
-            else:
-                RENDER_URL = "https://rahil-ob53-telegram-bot.onrender.com"
-                print(f"🤖 [WEBHOOK] Defaulted to hardcoded user RENDER_URL: {RENDER_URL}", flush=True)
+        if WEBHOOK_URL:
+            RENDER_URL = WEBHOOK_URL
+            print(f"🤖 [WEBHOOK] Using explicitly configured WEBHOOK_URL: {RENDER_URL}", flush=True)
+        elif not RENDER_URL and RENDER_SERVICE_NAME:
+            RENDER_URL = f"https://{RENDER_SERVICE_NAME}.onrender.com"
+            print(f"🤖 [WEBHOOK] Inferred RENDER_URL from service name: {RENDER_URL}", flush=True)
         
-        webhook_url = f"{RENDER_URL.rstrip('/')}/webhook"
-        print(f"🤖 [WEBHOOK] Detected Render environment! Setting webhook to: {webhook_url}", flush=True)
-        try:
-            bot.remove_webhook()
-            success = bot.set_webhook(url=webhook_url)
-            print(f"🤖 [WEBHOOK] Webhook registration status with Telegram: {success}", flush=True)
-        except Exception as we:
-            print(f"🤖 [WEBHOOK] Webhook registration failed: {we}", flush=True)
-            logger.error(f"Failed to set Telegram webhook: {we}")
+        if RENDER_URL:
+            webhook_url = f"{RENDER_URL.rstrip('/')}/webhook"
+            print(f"🤖 [WEBHOOK] Detected Render environment! Setting webhook to: {webhook_url}", flush=True)
+            try:
+                bot.remove_webhook()
+                success = bot.set_webhook(url=webhook_url)
+                print(f"🤖 [WEBHOOK] Webhook registration status with Telegram: {success}", flush=True)
+            except Exception as we:
+                print(f"🤖 [WEBHOOK] Webhook registration failed: {we}", flush=True)
+                logger.error(f"Failed to set Telegram webhook: {we}")
+        else:
+            print("⚠️ [WEBHOOK] Render environment detected but RENDER_EXTERNAL_URL / WEBHOOK_URL is not configured yet.", flush=True)
+            print("⚠️ [WEBHOOK] Rest assured! Webhook will be auto-registered dynamically on first HTTP request to / or /health.", flush=True)
     else:
+        # Local or non-Render fallback: start bot polling in a background thread
         def run_bot_polling():
             try:
                 print("🔌 [POLLING] Removing any existing webhook to start polling...", flush=True)
@@ -306,3 +332,12 @@ if bot:
 
         threading.Thread(target=run_bot_polling, daemon=True).start()
         print("🔌 [POLLING] Background polling thread deployed successfully.", flush=True)
+
+# ===== START SERVER =====
+if __name__ == "__main__":
+    PORT = int(os.environ.get("PORT", 10000))
+    print(f"SERVER STARTED ON PORT {PORT}")
+    if BOT_TOKEN:
+        app.run(host="0.0.0.0", port=PORT)
+    else:
+        print("Bot token not provided. Flask server active in standby simulation mode.")
