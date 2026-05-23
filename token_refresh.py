@@ -8,11 +8,17 @@ import requests
 from github import Github
 from datetime import datetime
 
-# ========= CONFIG =========
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8812061930:AAHfNmIA9M14bS72PWP4bQ3a0_UYWp4abyI")
+# ╔══════════════════════════════════════╗
+# ║      AUTO TOKEN REFRESH SYSTEM       ║
+# ║         ROBUST FIXED EDITION         ║
+# ╚══════════════════════════════════════╝
 
-# 🔴 CRITICAL FIX: PyGithub expects 'username/repo', NOT the full URL
+# ========= CONFIG =========
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# PyGithub expects 'username/repo'
 REPO_NAME = "eaglefacts82-hue/Free-Fire-Like-API"
 
 TOKENS_FILE = "tokens.json"
@@ -24,12 +30,14 @@ REFRESH_DELAY = 600
 ACCOUNT_DELAY = 8
 
 # ========= CHECK =========
+
 if not GITHUB_TOKEN:
     print("❌ GITHUB_TOKEN Missing! Token refresh system will fail. Set in environment variables.")
 if not BOT_TOKEN:
     print("❌ BOT_TOKEN Missing! Cannot send Telegram alerts.")
 
 # ========= GITHUB CONTEXT =========
+
 try:
     github_client = Github(GITHUB_TOKEN)
     repo = github_client.get_repo(REPO_NAME)
@@ -39,6 +47,7 @@ except Exception as e:
     repo = None
 
 # ========= TELEGRAM MESSAGE =========
+
 def send_message(text):
     if not BOT_TOKEN:
         return
@@ -54,11 +63,13 @@ def send_message(text):
         print("Telegram Alert Error:", e)
 
 # ========= LOGS =========
+
 def log(text):
     current = datetime.now().strftime("%H:%M:%S")
     print(f"[{current}] {text}")
 
 # ========= READ FILE (WITH FALLBACK) =========
+
 import ast
 
 def read_json_file(filename):
@@ -69,6 +80,7 @@ def read_json_file(filename):
         file = repo.get_contents(filename)
         content = base64.b64decode(file.content).decode("utf-8")
         
+        # Support python dictionary files (.py) natively
         if filename.endswith(".py"):
             try:
                 if "=" in content:
@@ -79,6 +91,7 @@ def read_json_file(filename):
             except Exception as pe:
                 log(f"Python dictionary parse error in {filename}: {pe}")
         
+        # Standard JSON parsing fallback
         json_data = json.loads(content)
         return json_data, file.sha
     except Exception as e:
@@ -86,17 +99,25 @@ def read_json_file(filename):
         return {}, None
 
 # ========= UPDATE FILE (CRITICAL FIX FOR 409 CONFLICT) =========
+
 def update_json_file(filename, data):
+    """
+    Saves and updates json or python files in GitHub repository.
+    CRITICAL FIX: We dynamically query the file metadata right before updating to fetch
+    the absolute latest 'sha' signature. This completely prevents 409 Conflicting revision crashes.
+    """
     if not repo:
         log("Failed to update: repo is undefined or offline.")
         return False
     try:
         if filename.endswith(".py"):
+            # Format as standard Python file dictionary definition
             var_name = "tokens" if "token" in filename.lower() else "accounts"
             new_content = f"{var_name} = {json.dumps(data, indent=4)}\n"
         else:
             new_content = json.dumps(data, indent=4)
         
+        # Always fetch the newest fresh SHA to prevent out-of-sync 409 API error
         try:
             file_meta = repo.get_contents(filename)
             latest_sha = file_meta.sha
@@ -124,6 +145,7 @@ def update_json_file(filename, data):
         return False
 
 # ========= TOKEN VALIDITY CHECK =========
+
 def is_token_expired(token):
     if not token or not isinstance(token, str):
         return True
@@ -133,6 +155,7 @@ def is_token_expired(token):
             return True
         payload_b64 = parts[1]
         
+        # Add required padding characters to prevent base64 decoding errors
         rem = len(payload_b64) % 4
         if rem > 0:
             payload_b64 += '=' * (4 - rem)
@@ -151,6 +174,7 @@ def is_token_expired(token):
         return True
 
 # ========= TOKEN GENERATOR =========
+
 def generate_token(uid, password):
     try:
         url = "https://ff.garena.com/api/login"
@@ -180,7 +204,8 @@ def generate_token(uid, password):
         log(f"TOKEN GENERATOR EXCEPTION FOR UID {uid}: {e}")
         return None
 
-# ========= MAIN REFRESH ROUTINE =========
+# ========= MAIN REFRESH ROUTINE (WITH ROBUST PARSING FIXES) =========
+
 async def auto_refresh():
     if not repo:
         log("Github Repo not connected. Auto refresh stopped.")
@@ -191,6 +216,7 @@ async def auto_refresh():
     global TOKENS_FILE, UIDPASS_FILE
     while True:
         try:
+            # 1. Read files and dynamically auto-detect formatting (.py vs .json)
             tokens_data, tokens_sha = read_json_file("tokens.py")
             if tokens_sha is not None:
                 TOKENS_FILE = "tokens.py"
@@ -217,6 +243,7 @@ async def auto_refresh():
                 await asyncio.sleep(300)
                 continue
 
+            # Conversion for accounts structures.
             accounts_list = []
             if isinstance(uidpass_data, dict):
                 log("🔄 uidpass.json detected as dictionary format. Converting to lists...")
@@ -277,6 +304,7 @@ async def auto_refresh():
                     failed_count += 1
                     log(f"Local Account Loop Error: {acc_err}")
 
+            # ===== SAVE TOKENS TO REPOSITORY =====
             if updated:
                 save_success = update_json_file(TOKENS_FILE, tokens_data)
                 if save_success:
@@ -285,7 +313,7 @@ async def auto_refresh():
                 else:
                     log(f"❌ File Upload Failed (Success was {success_count})")
             else:
-                log("⚠️ No credentials succeeded. Skip file upload.")
+                log("⚠️ No credentials succeeded/expired. Skip file upload.")
 
             log(f"Routine completed. Dormant for {REFRESH_DELAY} seconds.")
             await asyncio.sleep(REFRESH_DELAY)
